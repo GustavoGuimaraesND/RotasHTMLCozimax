@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang=\"pt-br\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Viagem 61</title>
+  <script src=\"https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js\"></script>
+  <link href=\"https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css\" rel=\"stylesheet\"/>
+  <style>
+    html, body { height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #map { position:absolute; inset:0; }
+    .panel { position:absolute; top:12px; left:12px; background:#ffffffee; padding:10px 12px; border-radius:10px; box-shadow:0 4px 12px rgba(0,0,0,.12); font-size:14px; }
+  </style>
+</head>
+<body>
+  <div id=\"map\"></div>
+  <div class=\"panel\" id=\"panel\">Viagem <b>61</b> — <span id=\"stats\">calculando…</span></div>
+<script>
+mapboxgl.accessToken = 'pk.eyJ1IjoiZ3VzdGF2b2d1aW1hcmFlczkyIiwiYSI6ImNtZWxkb2s1OTBhcWwyanB4d3Jmbmc4czcifQ.LlTflYzcZieKdmOmDo85_w';
+const PROFILE = 'driving';
+const OVERVIEW = 'full';
+const STEPS = false;
+
+const coords = [[-49.488604, -20.805254], [-43.172896, -22.906847], [-43.115221, -22.885898], [-43.063765, -22.827288], [-41.883346, -22.755328], [-42.819192, -22.916099], [-49.488604, -20.805254]]; // [[lon,lat], ...]
+
+function chunkPoints(points, maxPerReq=25){
+  if(points.length <= maxPerReq) return [points];
+  const out=[]; let i=0;
+  while(i < points.length-1){
+    const end = Math.min(i + maxPerReq - 1, points.length - 1);
+    out.push(points.slice(i, end+1));
+    if(end === points.length-1) break;
+    i = end; // sobrepõe último ponto para conectar com próximo bloco
+  }
+  return out;
+}
+
+// Remove duplicatas consecutivas (mantém primeiro e último mesmo se iguais)
+function dedupeConsecutive(arr){
+  if(arr.length <= 1) return arr.slice();
+  const out=[arr[0]];
+  for(let i=1;i<arr.length;i++){
+    const a=arr[i-1], b=arr[i];
+    if(a[0]===b[0] && a[1]===b[1]) continue;
+    out.push(b);
+  }
+  return out;
+}
+
+function buildDirectionsURL(cs){
+  const s = cs.map(c => c.join(',')).join(';');
+  const p = new URLSearchParams({ overview: OVERVIEW, steps: String(STEPS), geometries: 'geojson' });
+  return 'https://api.mapbox.com/directions/v5/mapbox/' + PROFILE + '/' + s + '?' + p.toString() + '&access_token=' + mapboxgl.accessToken;
+}
+
+async function fetchRoute(cs){
+  const r = await fetch(buildDirectionsURL(cs));
+  if(!r.ok) throw new Error('Directions falhou: ' + r.status);
+  const j = await r.json();
+  if(!j.routes || !j.routes[0]) throw new Error('Sem rota retornada');
+  return j.routes[0];
+}
+
+function fmtKm(m){ return (m/1000).toLocaleString('pt-BR', {maximumFractionDigits:1}); }
+function fmtDur(s){ const h=Math.floor(s/3600), m=Math.round((s%3600)/60); return h>0? (h+'h '+m+'min') : (m+'min'); }
+
+function pointsFC(points){
+  return { type:'FeatureCollection', features: points.map((c,i)=>({
+    type:'Feature', geometry:{ type:'Point', coordinates:c }, properties:{order:i+1}
+  }))};
+}
+
+(function(){
+  const map = new mapboxgl.Map({ container:'map', style:'mapbox://styles/mapbox/streets-v12', center: coords[0], zoom: 8 });
+  map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+  map.on('load', async ()=>{
+    // Adiciona pontos numerados imediatamente
+    map.addSource('pts_src', { type:'geojson', data: pointsFC(coords) });
+    map.addLayer({ id:'pts', type:'circle', source:'pts_src',
+      paint:{ 'circle-radius':5,'circle-stroke-width':1.5,'circle-stroke-color':'#fff','circle-color':'#1e88e5' }
+    });
+    map.addLayer({ id:'labels', type:'symbol', source:'pts_src',
+      layout:{
+        'text-field': ['to-string', ['get','order']],
+        'text-size': 12,
+        'text-font': ['DIN Pro Medium','Arial Unicode MS Regular'],
+        'text-offset': [0, 0.8],
+        'text-anchor': 'top',
+        'text-allow-overlap': true,
+        'text-ignore-placement': true
+      },
+      paint:{ 'text-halo-color': '#ffffff', 'text-halo-width': 1.2, 'text-halo-blur': 0.2 }
+    });
+
+    try{
+      // Calcula rotas por blocos com proteção contra duplicatas consecutivas
+      const prepared = dedupeConsecutive(coords);
+      const chunks = chunkPoints(prepared,25);
+      let dist=0, dur=0; const lines=[];
+      for(const ch of chunks){
+        if(ch.length < 2) continue; // ignora blocos inválidos
+        try{
+          const route = await fetchRoute(ch);
+          dist += route.distance || 0; dur += route.duration || 0;
+          if(route.geometry) { for (const c of route.geometry.coordinates) { lines.push(c); } }
+        }catch(e){
+          console.error('Falha em um bloco Directions:', e);
+        }
+      }
+
+      if(lines.length){
+        map.addSource('route', { type:'geojson', data:{ type:'FeatureCollection', features:[
+          { type:'Feature', geometry:{ type:'LineString', coordinates: lines } }
+        ]}});
+        map.addLayer({ id:'line', type:'line', source:'route', paint:{ 'line-color':'#1e88e5','line-width':4 } });
+      }
+
+      // Fit bounds considerando pontos (sempre disponível)
+      const lons = coords.map(c=>c[0]), lats = coords.map(c=>c[1]);
+      const b = [[Math.min(...lons), Math.min(...lats)],[Math.max(...lons), Math.max(...lats)]];
+      map.fitBounds(b, {padding:60, duration:0});
+
+      // Stats (se não houver rota, mostra aviso)
+      const statsEl = document.getElementById('stats');
+      if(dist>0 || dur>0){
+        statsEl.textContent = 'Distância: ' + fmtKm(dist) + ' km · Duração: ' + fmtDur(dur);
+      } else {
+        statsEl.textContent = 'Rota sem retorno da API (mostrando apenas pontos)';
+      }
+    }catch(err){
+      console.error(err);
+      document.getElementById('stats').textContent = 'Erro ao calcular rota: ' + err.message;
+    }
+  });
+})();
+</script>
+</body>
+</html>
