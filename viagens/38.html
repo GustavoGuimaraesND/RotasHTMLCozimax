@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang=\"pt-br\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Viagem 38</title>
+  <script src=\"https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js\"></script>
+  <link href=\"https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css\" rel=\"stylesheet\"/>
+  <style>
+    html, body { height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #map { position:absolute; inset:0; }
+    .panel { position:absolute; top:12px; left:12px; background:#ffffffee; padding:10px 12px; border-radius:10px; box-shadow:0 4px 12px rgba(0,0,0,0.12); font-size:14px; }
+  </style>
+</head>
+<body>
+  <div id=\"map\"></div>
+  <div class=\"panel\" id=\"panel\">Viagem <b>38</b> — <span id=\"stats\">calculando…</span></div>
+<script>
+mapboxgl.accessToken = 'pk.eyJ1IjoiZ3VzdGF2b2d1aW1hcmFlczkyIiwiYSI6ImNtZWxkb2s1OTBhcWwyanB4d3Jmbmc4czcifQ.LlTflYzcZieKdmOmDo85_w';
+const PROFILE = 'driving';
+const OVERVIEW = 'full';
+const STEPS = false;
+
+const coords = [[-49.488604, -20.805254], [-47.151996, -21.091036], [-46.965229, -21.189519], [-46.797685, -21.295376], [-46.708493, -21.305488], [-46.139101, -21.249235], [-45.94702, -21.424517], [-45.42709, -21.556662], [-45.251176, -21.694662], [-45.56296, -21.092825], [-46.386562, -20.8609], [-46.505478, -20.635092], [-46.613335, -20.722143], [-46.750588, -20.743711], [-46.984144, -20.917086], [-49.488604, -20.805254]];       // [[lon,lat], ...] (para rota)
+const points = [{"lon": -49.488604, "lat": -20.805254, "m3": 0.0}, {"lon": -47.151996, "lat": -21.091036, "m3": 2.34}, {"lon": -46.965229, "lat": -21.189519, "m3": 4.93}, {"lon": -46.797685, "lat": -21.295376, "m3": 2.05}, {"lon": -46.708493, "lat": -21.305488, "m3": 2.09}, {"lon": -46.139101, "lat": -21.249235, "m3": 10.88}, {"lon": -45.94702, "lat": -21.424517, "m3": 3.59}, {"lon": -45.42709, "lat": -21.556662, "m3": 2.93}, {"lon": -45.251176, "lat": -21.694662, "m3": 1.6}, {"lon": -45.56296, "lat": -21.092825, "m3": 2.98}, {"lon": -46.386562, "lat": -20.8609, "m3": 1.85}, {"lon": -46.505478, "lat": -20.635092, "m3": 5.91}, {"lon": -46.613335, "lat": -20.722143, "m3": 5.83}, {"lon": -46.750588, "lat": -20.743711, "m3": 3.0}, {"lon": -46.984144, "lat": -20.917086, "m3": 9.52}, {"lon": -49.488604, "lat": -20.805254, "m3": 0.0}];       // [{lon,lat,m3}, ...] alinhado ao coords
+const volume = 59.5;          // m³ total da viagem
+
+function chunkPoints(points, maxPerReq=25){
+  if(points.length <= maxPerReq) return [points];
+  const out=[]; let i=0;
+  while(i < points.length-1){
+    const end = Math.min(i + maxPerReq - 1, points.length - 1);
+    out.push(points.slice(i, end+1));
+    if(end === points.length-1) break;
+    i = end;
+  }
+  return out;
+}
+
+function buildDirectionsURL(cs){
+  const s = cs.map(c => c.join(',')).join(';');
+  const p = new URLSearchParams({ overview: OVERVIEW, steps: String(STEPS), geometries: 'geojson' });
+  return 'https://api.mapbox.com/directions/v5/mapbox/' + PROFILE + '/' + s + '?' + p.toString() + '&access_token=' + mapboxgl.accessToken;
+}
+
+async function fetchRoute(cs){
+  const r = await fetch(buildDirectionsURL(cs));
+  if(!r.ok) throw new Error('Directions falhou: ' + r.status);
+  const j = await r.json();
+  if(!j.routes || !j.routes[0]) throw new Error('Sem rota retornada');
+  return j.routes[0];
+}
+
+function fmtKm(m){ return (m/1000).toLocaleString('pt-BR', {maximumFractionDigits:1}); }
+function fmtDur(s){ const h=Math.floor(s/3600), m=Math.round((s%3600)/60); return h>0? (h+'h '+m+'min') : (m+'min'); }
+
+(function(){
+  const map = new mapboxgl.Map({ container:'map', style:'mapbox://styles/mapbox/streets-v12', center: coords[0], zoom: 8 });
+  map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+  map.on('load', async ()=>{
+    try{
+      const chunks = chunkPoints(coords,25);
+      let dist=0, dur=0; const lines=[];
+      for(const ch of chunks){
+        const route = await fetchRoute(ch);
+        dist += route.distance || 0; dur += route.duration || 0;
+        if(route.geometry) { for (const c of route.geometry.coordinates) { lines.push(c); } }
+      }
+      // Features: line + points (com propriedades)
+      const features = [ { type:'Feature', geometry:{ type:'LineString', coordinates: lines } } ];
+      for(let i=0;i<coords.length;i++){
+        const c = coords[i];
+        const p = points[i] || {m3:0};
+        const isStart = (i===0);
+        const isEnd   = (i===coords.length-1);
+        const order = (isStart || isEnd) ? '' : String(i); // numera 1..N, ignora depósitos
+        features.push({
+          type:'Feature',
+          geometry:{ type:'Point', coordinates:c },
+          properties:{ order: order, m3_stop: Number(p.m3||0).toFixed(1), is_depot: (isStart||isEnd) }
+        });
+      }
+      map.addSource('route', { type:'geojson', data:{ type:'FeatureCollection', features } });
+
+      map.addLayer({ id:'line', type:'line', source:'route',
+        paint:{ 'line-color':'#1e88e5','line-width':4 },
+        filter:['==',['geometry-type'],'LineString']
+      });
+      map.addLayer({ id:'pts', type:'circle', source:'route',
+        paint:{ 'circle-radius':6,'circle-stroke-width':1.5,'circle-stroke-color':'#fff','circle-color':'#1e88e5' },
+        filter:['==',['geometry-type'],'Point']
+      });
+      map.addLayer({ id:'labels', type:'symbol', source:'route',
+        layout:{ 'text-field':['get','order'], 'text-size':12, 'text-offset':[0,0.8], 'text-anchor':'top' },
+        paint:{ 'text-color':'#000000', 'text-halo-color':'#ffffff', 'text-halo-width':1.5 },
+        filter:['all',['==',['geometry-type'],'Point'], ['!=',['get','order'],'']]
+      });
+
+      // Tooltip de m3 por parada
+      const popup = new mapboxgl.Popup({ closeButton:false, closeOnClick:false });
+      map.on('mouseenter','pts', (e)=>{
+        map.getCanvas().style.cursor = 'pointer';
+        const f = e.features && e.features[0];
+        if(!f) return;
+        const o = f.properties.order;
+        const m3s = f.properties.m3_stop;
+        const isDepot = String(f.properties.is_depot) === 'true';
+        const title = isDepot ? 'Depósito' : `Ponto ${o}`;
+        popup.setLngLat(f.geometry.coordinates)
+             .setHTML(`<div style=\"font: 12px/1.4 system-ui, -apple-system, Segoe UI, Roboto\"><b>38</b><br/>Volume: <b>${m3s}</b> m³</div>`)
+             .addTo(map);
+      });
+      map.on('mouseleave','pts', ()=>{ map.getCanvas().style.cursor = ''; popup.remove(); });
+
+      // Fit bounds
+      const lons = coords.map(c=>c[0]), lats = coords.map(c=>c[1]);
+      const b = [[Math.min(...lons), Math.min(...lats)],[Math.max(...lons), Math.max(...lats)]];
+      map.fitBounds(b, {padding:60, duration:0});
+
+      // Painel
+      document.getElementById('stats').textContent = 'Distância: ' + fmtKm(dist) + ' km · Duração: ' + fmtDur(dur) + ' · Volume: ' + volume.toLocaleString('pt-BR', {maximumFractionDigits:1}) + ' m³';
+    }catch(err){
+      console.error(err);
+      document.getElementById('stats').textContent = 'Erro ao calcular rota: ' + err.message;
+    }
+  });
+})();
+</script>
+</body>
+</html>
