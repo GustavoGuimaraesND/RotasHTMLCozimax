@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang=\"pt-br\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Viagem 27</title>
+  <script src=\"https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js\"></script>
+  <link href=\"https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css\" rel=\"stylesheet\"/>
+  <script src=\"https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js\"></script>
+  <style>
+    html, body { height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #map { position:absolute; inset:0; }
+    .panel { position:absolute; top:12px; left:12px; background: rgba(255,255,255,0.93); padding:10px 12px; border-radius:10px; box-shadow:0 4px 12px rgba(0,0,0,0.12); font-size:14px; }
+  </style>
+</head>
+<body>
+  <div id=\"map\"></div>
+  <div class=\"panel\" id=\"panel\">Viagem <b>27</b> — <span id=\"stats\">calculando…</span></div>
+<script>
+mapboxgl.accessToken = 'pk.eyJ1IjoiZ3VzdGF2b2d1aW1hcmFlczkyIiwiYSI6ImNtZWxkb2s1OTBhcWwyanB4d3Jmbmc4czcifQ.LlTflYzcZieKdmOmDo85_w';
+const PROFILE = 'driving';
+const OVERVIEW = 'full';
+const STEPS = false;
+
+const H3_RESOLUTION = 3;
+const H3_COVER_MODE = 'brazil';
+
+const BRAZIL_BOUNDS = [[-74.0, -34.0], [-34.0, 5.5]];
+function bboxToPolygon(bounds){
+  return [[
+    [bounds[0][0], bounds[0][1]],
+    [bounds[1][0], bounds[0][1]],
+    [bounds[1][0], bounds[1][1]],
+    [bounds[0][0], bounds[1][1]],
+    [bounds[0][0], bounds[0][1]]
+  ]];
+}
+
+const points = [{"lon": -49.488604, "lat": -20.805254, "m3": 0.0, "isDepot": true, "label": ""}, {"lon": -44.2012, "lat": -19.9673, "m3": 3.69, "isDepot": false, "label": "1"}, {"lon": -44.0809, "lat": -19.9162, "m3": 8.835, "isDepot": false, "label": "2"}, {"lon": -43.9345, "lat": -19.9167, "m3": 20.073, "isDepot": false, "label": "3"}, {"lon": -43.9402, "lat": -19.7884, "m3": 1.386, "isDepot": false, "label": "4"}, {"lon": -43.9243, "lat": -19.6888, "m3": 4.42, "isDepot": false, "label": "5"}, {"lon": -44.0854, "lat": -19.7619, "m3": 2.113, "isDepot": false, "label": "6"}, {"lon": -44.2417, "lat": -19.4574, "m3": 1.842, "isDepot": false, "label": "7"}, {"lon": -44.0308, "lat": -19.235, "m3": 2.97, "isDepot": false, "label": "8"}, {"lon": -44.9008, "lat": -18.7511, "m3": 3.499, "isDepot": false, "label": "9"}, {"lon": -45.2376, "lat": -19.3324, "m3": 1.568, "isDepot": false, "label": "10"}, {"lon": -45.4448, "lat": -19.1574, "m3": 3.686, "isDepot": false, "label": "11"}, {"lon": -50.6857, "lat": -19.6977, "m3": 0.586, "isDepot": false, "label": "12"}, {"lon": -50.549, "lat": -20.2687, "m3": 0.66, "isDepot": false, "label": "13"}, {"lon": -50.6971, "lat": -20.3592, "m3": 1.323, "isDepot": false, "label": "14"}, {"lon": -51.106, "lat": -20.649, "m3": 3.18, "isDepot": false, "label": "15"}, {"lon": -49.488604, "lat": -20.805254, "m3": 0.0, "isDepot": true, "label": ""}];
+const total_m3 = 59.831;
+const coords = points.map(p => [p.lon, p.lat]);
+
+function chunkPoints(points, maxPerReq=25){
+  if(points.length <= maxPerReq) return [points];
+  const out=[]; let i=0;
+  while(i < points.length-1){
+    const end = Math.min(i + maxPerReq - 1, points.length - 1);
+    out.push(points.slice(i, end+1));
+    if(end === points.length-1) break;
+    i = end;
+  }
+  return out;
+}
+
+function buildDirectionsURL(cs){
+  const s = cs.map(c => c.join(',')).join(';');
+  const p = new URLSearchParams({ overview: OVERVIEW, steps: String(STEPS), geometries: 'geojson' });
+  return 'https://api.mapbox.com/directions/v5/mapbox/' + PROFILE + '/' + s + '?' + p.toString() + '&access_token=' + mapboxgl.accessToken;
+}
+
+async function fetchRoute(cs){
+  const r = await fetch(buildDirectionsURL(cs));
+  if(!r.ok) throw new Error('Directions falhou: ' + r.status);
+  const j = await r.json();
+  if(!j.routes || !j.routes[0]) throw new Error('Sem rota retornada');
+  return j.routes[0];
+}
+
+function fmtKm(m){ return (m/1000).toLocaleString('pt-BR', {maximumFractionDigits:1}); }
+function fmtDur(s){ const h=Math.floor(s/3600), m=Math.round((s%3600)/60); return h>0? (h+'h '+m+'min') : (m+'min'); }
+function fmtM3(x){ return Number(x||0).toLocaleString('pt-BR', {maximumFractionDigits:2}); }
+
+function aggregatePointsToH3(points){
+  const acc = new Map();
+  for(const p of points){
+    if(p.isDepot) continue;
+    const idx = h3.latLngToCell(p.lat, p.lon, H3_RESOLUTION);
+    const prev = acc.get(idx) || { value: 0, count: 0 };
+    prev.value += Number(p.m3 || 0);
+    prev.count += 1;
+    acc.set(idx, prev);
+  }
+  return acc;
+}
+
+function coverHexesByMode(map){
+  if (H3_COVER_MODE === 'stops') {
+    return aggregatePointsToH3(points);
+  }
+  if (H3_COVER_MODE === 'brazil') {
+    const poly = bboxToPolygon(BRAZIL_BOUNDS);
+    const cells = h3.polygonToCells(poly, H3_RESOLUTION, { isGeoJson: true });
+    console.debug('H3 brazil cells:', cells.length, 'res', H3_RESOLUTION);
+    return new Map(cells.map(id => [id, {value: 0, count: 0}]));
+  }
+  if (H3_COVER_MODE === 'viewport') {
+    const b = map.getBounds();
+    const poly = [[
+      [b.getWest(),  b.getSouth()],
+      [b.getEast(),  b.getSouth()],
+      [b.getEast(),  b.getNorth()],
+      [b.getWest(),  b.getNorth()],
+      [b.getWest(),  b.getSouth()]
+    ]];
+    const cells = h3.polygonToCells(poly, H3_RESOLUTION, { isGeoJson: true });
+    console.debug('H3 viewport cells:', cells.length, 'res', H3_RESOLUTION);
+    return new Map(cells.map(id => [id, {value: 0, count: 0}]));
+  }
+  if (H3_COVER_MODE === 'world') {
+    const res0 = h3.getRes0Cells();
+    const cells = [];
+    for (const r0 of res0) cells.push(...h3.cellToChildren(r0, H3_RESOLUTION));
+    console.debug('H3 world cells:', cells.length, 'res', H3_RESOLUTION);
+    return new Map(cells.map(id => [id, {value: 0, count: 0}]));
+  }
+  return aggregatePointsToH3(points);
+}
+
+function hexMapToGeoJSON(acc){
+  const features = [];
+  for (const [idx, stats] of acc.entries()) {
+    const boundary = h3.cellToBoundary(idx, true);
+    features.push({
+      type: 'Feature',
+      geometry: { type: 'Polygon', coordinates: [boundary] },
+      properties: { h3: idx, value: stats.value, count: stats.count }
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+(function(){
+  const map = new mapboxgl.Map({ container:'map', style:'mapbox://styles/mapbox/streets-v12', center: coords[0], zoom: 8 });
+  map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+  map.on('load', async ()=>{
+    try{
+      const chunks = chunkPoints(coords,25);
+      let dist=0, dur=0; const lines=[];
+      for(const ch of chunks){
+        const route = await fetchRoute(ch);
+        dist += route.distance || 0; dur += route.duration || 0;
+        if(route.geometry) { for (const c of route.geometry.coordinates) { lines.push(c); } }
+      }
+
+      const pointFeatures = points.map((p)=>({
+        type:'Feature',
+        geometry:{ type:'Point', coordinates:[p.lon, p.lat] },
+        properties:{ label: String(p.label||''), m3: Number(p.m3||0), isDepot: p.isDepot ? 1 : 0 }
+      }));
+
+      map.addSource('route', { type:'geojson', data:{ type:'FeatureCollection', features:[
+        { type:'Feature', geometry:{ type:'LineString', coordinates: lines } },
+        ...pointFeatures
+      ]}});
+
+      map.addLayer({ id:'line', type:'line', source:'route',
+        paint:{ 'line-color':'#1e88e5','line-width':4 },
+        filter:['==',['geometry-type'],'LineString']
+      });
+      map.addLayer({ id:'pts', type:'circle', source:'route',
+        paint:{ 'circle-radius':6,'circle-stroke-width':1.5,'circle-stroke-color':'#fff','circle-color':'#1e88e5' },
+        filter:['all',['==',['geometry-type'],'Point']]
+      });
+      map.addLayer({ id:'labels', type:'symbol', source:'route',
+        layout:{ 'text-field':['get','label'], 'text-size':12, 'text-offset':[0,0.8], 'text-anchor':'top' },
+        paint:{ 'text-color':'#000000', 'text-halo-color':'#ffffff', 'text-halo-width':1.5 },
+        filter:['all',['==',['geometry-type'],'Point']]
+      });
+
+      let acc = coverHexesByMode(map);
+      let hexGJ = hexMapToGeoJSON(acc);
+
+      map.addSource('hex', { type:'geojson', data: hexGJ });
+      map.addLayer({ id:'hex-fill', type:'fill', source:'hex', paint:{
+        'fill-opacity': [
+          'interpolate', ['linear'], ['get','value'],
+          0, 0.08,
+          5, 0.16,
+          20, 0.22,
+          60, 0.30,
+          120, 0.38
+        ],
+        'fill-color': '#111111'
+      }});
+      map.addLayer({ id:'hex-line', type:'line', source:'hex', paint:{
+        'line-opacity': 0.35,
+        'line-width': 0.6,
+        'line-color': '#000000'
+      }});
+
+      if (H3_COVER_MODE === 'viewport') {
+        map.on('moveend', ()=>{
+          const acc2 = coverHexesByMode(map);
+          const gj2  = hexMapToGeoJSON(acc2);
+          map.getSource('hex').setData(gj2);
+        });
+      }
+
+      const lons = coords.map(c=>c[0]), lats = coords.map(c=>c[1]);
+      const b = [[Math.min(...lons), Math.min(...lats)],[Math.max(...lons), Math.max(...lats)]];
+      map.fitBounds(b, {padding:60, duration:0});
+
+      document.getElementById('stats').textContent = 'Distância: ' + fmtKm(dist) + ' km · Duração: ' + fmtDur(dur) + ' · M³: ' + fmtM3(total_m3) + ` · H3(res=${H3_RESOLUTION}, mode=${H3_COVER_MODE})`;
+    }catch(err){
+      console.error(err);
+      document.getElementById('stats').textContent = 'Erro ao calcular rota: ' + err.message;
+    }
+  });
+})();
+</script>
+</body>
+</html>
