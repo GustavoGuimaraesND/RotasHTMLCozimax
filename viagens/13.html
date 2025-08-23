@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Viagem 13</title>
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet"/>
+  <!-- NOVO: biblioteca H3 no navegador -->
+  <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+  <style>
+    html, body { height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #map { position:absolute; inset:0; }
+    .panel { position:absolute; top:12px; left:12px; background: rgba(255,255,255,0.93); padding:10px 12px; border-radius:10px; box-shadow:0 4px 12px rgba(0,0,0,0.12); font-size:14px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="panel" id="panel">Viagem <b>13</b> — <span id="stats">calculando…</span></div>
+<script>
+mapboxgl.accessToken = 'pk.eyJ1IjoiZ3VzdGF2b2d1aW1hcmFlczkyIiwiYSI6ImNtZWxkb2s1OTBhcWwyanB4d3Jmbmc4czcifQ.LlTflYzcZieKdmOmDo85_w';
+const PROFILE = 'driving';
+const OVERVIEW = 'full';
+const STEPS = false;
+
+// ===== NOVO: resolução H3 =====
+const H3_RESOLUTION = 3;
+
+// Lista de pontos com m³ agregado e metadados
+// Estrutura: [{lon,lat,m3,isDepot,label}, ...] onde label é string vazia nos depósitos
+const points = [{"lon": -49.488604, "lat": -20.805254, "m3": 0.0, "isDepot": true, "label": ""}, {"lon": -47.3978, "lat": -22.1892, "m3": 16.576, "isDepot": false, "label": "1"}, {"lon": -47.4234, "lat": -21.9936, "m3": 5.911, "isDepot": false, "label": "2"}, {"lon": -47.8909, "lat": -22.0087, "m3": 10.774000000000001, "isDepot": false, "label": "3"}, {"lon": -48.8317, "lat": -21.7548, "m3": 25.999000000000006, "isDepot": false, "label": "4"}, {"lon": -49.488604, "lat": -20.805254, "m3": 0.0, "isDepot": true, "label": ""}];
+const total_m3 = 59.26;
+
+// Coords para Directions
+const coords = points.map(p => [p.lon, p.lat]);
+
+function chunkPoints(points, maxPerReq=25){
+  if(points.length <= maxPerReq) return [points];
+  const out=[]; let i=0;
+  while(i < points.length-1){
+    const end = Math.min(i + maxPerReq - 1, points.length - 1);
+    out.push(points.slice(i, end+1));
+    if(end === points.length-1) break;
+    i = end; // sobrepõe último ponto para conectar com próximo bloco
+  }
+  return out;
+}
+
+function buildDirectionsURL(cs){
+  const s = cs.map(c => c.join(',')).join(';');
+  const p = new URLSearchParams({ overview: OVERVIEW, steps: String(STEPS), geometries: 'geojson' });
+  return 'https://api.mapbox.com/directions/v5/mapbox/' + PROFILE + '/' + s + '?' + p.toString() + '&access_token=' + mapboxgl.accessToken;
+}
+
+async function fetchRoute(cs){
+  const r = await fetch(buildDirectionsURL(cs));
+  if(!r.ok) throw new Error('Directions falhou: ' + r.status);
+  const j = await r.json();
+  if(!j.routes || !j.routes[0]) throw new Error('Sem rota retornada');
+  return j.routes[0];
+}
+
+function fmtKm(m){ return (m/1000).toLocaleString('pt-BR', {maximumFractionDigits:1}); }
+function fmtDur(s){ const h=Math.floor(s/3600), m=Math.round((s%3600)/60); return h>0? (h+'h '+m+'min') : (m+'min'); }
+function fmtM3(x){ return Number(x||0).toLocaleString('pt-BR', {maximumFractionDigits:2}); }
+
+// ===== NOVO: utilitários H3 =====
+function aggregatePointsToH3(points){
+  // Agrega apenas pontos que NÃO são depósito
+  const acc = new Map(); // idx -> { value, count }
+  for(const p of points){
+    if(p.isDepot) continue;
+    const idx = h3.latLngToCell(p.lat, p.lon, H3_RESOLUTION);
+    const prev = acc.get(idx) || { value: 0, count: 0 };
+    // padrão: somar m³; se preferir contagem, troque por: prev.value += 1
+    prev.value += Number(p.m3 || 0);
+    prev.count += 1;
+    acc.set(idx, prev);
+  }
+  return acc; // Map index -> {value, count}
+}
+
+function h3ToGeoJSON(acc){
+  const features = [];
+  for (const [idx, stats] of acc.entries()) {
+    const boundary = h3.cellToBoundary(idx, true);
+    const coords = [boundary];
+    features.push({
+      type: 'Feature',
+      geometry: { type: 'Polygon', coordinates: coords },
+      properties: { h3: idx, value: stats.value, count: stats.count }
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+(function(){
+  const map = new mapboxgl.Map({ container:'map', style:'mapbox://styles/mapbox/streets-v12', center: coords[0], zoom: 8 });
+  map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+  map.on('load', async ()=>{
+    try{
+      // ===== Camada de rota (sua lógica original) =====
+      const chunks = chunkPoints(coords,25);
+      let dist=0, dur=0; const lines=[];
+      for(const ch of chunks){
+        const route = await fetchRoute(ch);
+        dist += route.distance || 0; dur += route.duration || 0;
+        if(route.geometry) { for (const c of route.geometry.coordinates) { lines.push(c); } }
+      }
+
+      const pointFeatures = points.map((p)=>({
+        type:'Feature',
+        geometry:{ type:'Point', coordinates:[p.lon, p.lat] },
+        properties:{ label: String(p.label||''), m3: Number(p.m3||0), isDepot: p.isDepot ? 1 : 0 }
+      }));
+
+      map.addSource('route', { type:'geojson', data:{ type:'FeatureCollection', features:[
+        { type:'Feature', geometry:{ type:'LineString', coordinates: lines } },
+        ...pointFeatures
+      ]}});
+
+      map.addLayer({ id:'line', type:'line', source:'route',
+        paint:{ 'line-color':'#1e88e5','line-width':4 },
+        filter:['==',['geometry-type'],'LineString']
+      });
+      map.addLayer({ id:'pts', type:'circle', source:'route',
+        paint:{ 'circle-radius':6,'circle-stroke-width':1.5,'circle-stroke-color':'#fff','circle-color':'#1e88e5' },
+        filter:['all',['==',['geometry-type'],'Point']]
+      });
+      map.addLayer({ id:'labels', type:'symbol', source:'route',
+        layout:{ 'text-field':['get','label'], 'text-size':12, 'text-offset':[0,0.8], 'text-anchor':'top' },
+        paint:{ 'text-color':'#000000', 'text-halo-color':'#ffffff', 'text-halo-width':1.5 },
+        filter:['all',['==',['geometry-type'],'Point']]
+      });
+
+      // Tooltip m³ (inalterado) — só para paradas numeradas
+      const popup = new mapboxgl.Popup({ closeButton:false, closeOnClick:false });
+      map.on('mouseenter', 'pts', (e)=>{
+        const f = e.features && e.features[0];
+        if(!f) return;
+        if((f.properties.isDepot|0) === 1) { map.getCanvas().style.cursor=''; popup.remove(); return; }
+        map.getCanvas().style.cursor = 'pointer';
+        const { label, m3 } = f.properties;
+        const [x,y] = f.geometry.coordinates;
+        popup.setLngLat([x,y]).setHTML(`<div style="font: 12px/1.4 system-ui">Ponto <b>${label}</b><br/>M³: <b>${fmtM3(m3)}</b></div>`).addTo(map);
+      });
+      map.on('mouseleave', 'pts', ()=>{ map.getCanvas().style.cursor = ''; popup.remove(); });
+
+      // ===== NOVO: camada HEX H3 =====
+      const acc = aggregatePointsToH3(points);
+      const hexGJ = h3ToGeoJSON(acc);
+      map.addSource('hex', { type:'geojson', data: hexGJ });
+      // Fill com opacidade baseada em value (m³ agregado por hex)
+      map.addLayer({ id:'hex-fill', type:'fill', source:'hex', paint:{
+        'fill-opacity': [
+          'interpolate', ['linear'], ['get','value'],
+          0, 0.06,
+          5, 0.12,
+          20, 0.20,
+          60, 0.28,
+          120, 0.36
+        ],
+        'fill-color': '#111111' // mantém sem paleta específica; contraste com fundo
+      }});
+      map.addLayer({ id:'hex-line', type:'line', source:'hex', paint:{
+        'line-opacity': 0.15,
+        'line-width': 0.3,
+        'line-color': '#000000'
+      }});
+
+      // Fit bounds geral
+      const lons = coords.map(c=>c[0]), lats = coords.map(c=>c[1]);
+      const b = [[Math.min(...lons), Math.min(...lats)],[Math.max(...lons), Math.max(...lats)]];
+      map.fitBounds(b, {padding:60, duration:0});
+
+      // Stats com m³ total + info da camada H3
+      document.getElementById('stats').textContent = 'Distância: ' + fmtKm(dist) + ' km · Duração: ' + fmtDur(dur) + ' · M³: ' + fmtM3(total_m3) + ` · H3(res=${H3_RESOLUTION}): ${hexGJ.features.length} células`;
+    }catch(err){
+      console.error(err);
+      document.getElementById('stats').textContent = 'Erro ao calcular rota: ' + err.message;
+    }
+  });
+})();
+</script>
+</body>
+</html>
